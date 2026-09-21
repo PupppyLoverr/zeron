@@ -112,6 +112,29 @@ pub mod methods {
     /// (IPC-only; never relay-forwarded — the stamped loopback URL is only
     /// meaningful to a harness running on THIS host).
     pub const REGISTER_BROWSER: &str = "RegisterBrowser";
+    // Zeron Computer (device-local desktop perception/control, feature
+    // `computer`). All are IPC-only and NEVER relay-forwarded: they report
+    // or act on whichever engine you are directly connected to — forwarding
+    // a desktop action to another machine's physical UI must be an explicit
+    // decision, not a relay side-effect.
+    /// Component/settings/capability snapshot → `zeron_computer::ComputerStatus`.
+    pub const COMPUTER_STATUS: &str = "ComputerStatus";
+    /// Persist `{enabled, semantic, screenshots, control, telemetry, …}`.
+    /// Returns the resulting `ComputerStatus`.
+    pub const COMPUTER_SET_SETTINGS: &str = "ComputerSetSettings";
+    /// Download + verify + install the pinned driver component (streams
+    /// `InstallProgress` items).
+    pub const COMPUTER_INSTALL: &str = "ComputerInstall";
+    /// Remove the installed component.
+    pub const COMPUTER_UNINSTALL: &str = "ComputerUninstall";
+    /// Live probe — driver ping + health report (OS permission grants).
+    pub const COMPUTER_PROBE: &str = "ComputerProbe";
+    /// One observe call → `zeron_computer::Observation` (screenshot rides as
+    /// a staged uploads-jail path, readable via ReadAttachmentChunk).
+    pub const COMPUTER_OBSERVE: &str = "ComputerObserve";
+    /// Subscribe to component status changes (install progress, settings,
+    /// driver liveness) — stream of `ComputerStatus` snapshots.
+    pub const WATCH_COMPUTER: &str = "WatchComputer";
     /// This engine runtime's fixed device and workspace identity.
     pub const ENGINE_INFO: &str = "EngineInfo";
     /// Readiness barrier for the engine runtime. The call completes once stores

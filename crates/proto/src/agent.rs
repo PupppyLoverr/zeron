@@ -144,14 +144,29 @@ pub fn browser_bridge_url(request: &RunRequest) -> Option<&str> {
         .and_then(serde_json::Value::as_str)
 }
 
+/// `model_options` key carrying the Zeron Computer endpoint. Device-local
+/// like the browser bridge — the loopback URL is meaningless on a remote
+/// host — but stamped by the engine service (feature `computer`), not by a
+/// viewport lease.
+pub const COMPUTER_OPTION: &str = "zeron_computer";
+
+/// The run's computer endpoint, if the engine stamped one.
+pub fn computer_url(request: &RunRequest) -> Option<&str> {
+    request
+        .model_options
+        .get(COMPUTER_OPTION)
+        .and_then(|v| v.get("url"))
+        .and_then(serde_json::Value::as_str)
+}
+
 /// `model_options` keys carrying zeron-internal run directives, never harness
 /// config. RuntimeConfig comparisons ignore them — they mark ONE run's
 /// behavior, not the session's runtime shape. Includes underscore-prefixed
-/// `_zeron*` keys and the host-local embedded-browser endpoint, whose URL
-/// must not restart a live runtime when a later send inherits a different
-/// window.
+/// `_zeron*` keys and the host-local embedded-browser/computer endpoints,
+/// whose URLs must not restart a live runtime when a later send inherits a
+/// different window.
 pub fn is_internal_option(key: &str) -> bool {
-    key.starts_with("_zeron") || key == BROWSER_BRIDGE_OPTION
+    key.starts_with("_zeron") || key == BROWSER_BRIDGE_OPTION || key == COMPUTER_OPTION
 }
 
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created
@@ -647,6 +662,7 @@ mod internal_option_tests {
     fn browser_bridge_is_internal_and_harness_options_are_not() {
         assert!(is_internal_option("_zeron_attach_replay"));
         assert!(is_internal_option(BROWSER_BRIDGE_OPTION));
+        assert!(is_internal_option(COMPUTER_OPTION));
         assert!(!is_internal_option("serviceTier"));
         assert!(!is_internal_option("zeron_unrelated"));
     }

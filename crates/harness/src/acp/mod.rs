@@ -909,7 +909,9 @@ impl AcpHarness {
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
-        let (mut child, _stderr) = self.spawn_agent(home.as_deref(), false, &[], None).await?;
+        let (mut child, _stderr) = self
+            .spawn_agent(home.as_deref(), false, &[], None, None)
+            .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1213,6 +1215,7 @@ impl AcpHarness {
         block_on_install: bool,
         extra_args: &[String],
         browser_url: Option<&str>,
+        computer_url: Option<&str>,
     ) -> Result<(Child, crate::StderrTail), HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
@@ -1220,6 +1223,9 @@ impl AcpHarness {
         cmd.args(extra_args);
         if let Some(url) = browser_url {
             cmd.env(crate::BROWSER_BRIDGE_ENV, url);
+        }
+        if let Some(url) = computer_url {
+            cmd.env(crate::COMPUTER_ENV, url);
         }
         crate::compose_child_path(&mut cmd, &exe);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
@@ -1259,7 +1265,7 @@ impl AcpHarness {
     /// refuses sessions before login still surfaces whatever the handshake
     /// advertised.
     async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        let (mut child, _stderr) = self.spawn_agent(None, false, &[], None).await?;
+        let (mut child, _stderr) = self.spawn_agent(None, false, &[], None, None).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1323,7 +1329,7 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (mut child, stderr_tail) = self.spawn_agent(None, false, &[], None).await?;
+        let (mut child, stderr_tail) = self.spawn_agent(None, false, &[], None, None).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1734,6 +1740,7 @@ impl Harness for AcpHarness {
                 true,
                 &[],
                 crate::browser_bridge_url(&request),
+                crate::computer_url(&request),
             )
             .await?;
         let stdin = child
@@ -2727,6 +2734,7 @@ async fn run_session(session: Session) {
             "cwd": request.cwd,
             "mcpServers": crate::browser_bridge_acp_server(&request)
                 .into_iter()
+                .chain(crate::computer_acp_server(&request))
                 .collect::<Vec<_>>(),
         });
         let (session_id, mut session_response) = if let Some(resume) = &request.resume {

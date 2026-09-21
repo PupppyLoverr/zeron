@@ -37,6 +37,12 @@ ignore.workspace = true
 nucleo-matcher.workspace = true
 
 tempfile.workspace = true
+zeron-computer = { workspace = true, optional = true }
+
+[features]
+# Device-local desktop perception/control (Cua driver). Off by default —
+# no service, no RPCs, no run stamping without it.
+computer = ["dep:zeron-computer"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }

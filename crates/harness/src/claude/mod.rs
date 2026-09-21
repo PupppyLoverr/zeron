@@ -213,16 +213,30 @@ impl ClaudeHarness {
             cmd.arg("--settings");
             cmd.arg(Value::Object(settings).to_string());
         }
-        // The app stamps local runs with the loopback embedded-browser
-        // endpoint; `--mcp-config` merges alongside the user's own servers
-        // (strict mode stays title-only), and the env var is the uniform
-        // fallback every harness gets.
+        // The app stamps local runs with the loopback embedded-browser and
+        // computer endpoints; `--mcp-config` merges alongside the user's own
+        // servers (strict mode stays title-only), and the env vars are the
+        // uniform fallback every harness gets. Both servers ride ONE flag —
+        // whether claude merges repeated --mcp-config args is not
+        // guaranteed.
+        let mut mcp_servers = serde_json::Map::new();
         if let Some(url) = crate::browser_bridge_url(request) {
-            cmd.arg("--mcp-config").arg(
-                serde_json::json!({"mcpServers": {"zeron-browser": {"type": "http", "url": url}}})
-                    .to_string(),
+            mcp_servers.insert(
+                "zeron-browser".into(),
+                serde_json::json!({"type": "http", "url": url}),
             );
             cmd.env(crate::BROWSER_BRIDGE_ENV, url);
+        }
+        if let Some(url) = crate::computer_url(request) {
+            mcp_servers.insert(
+                "zeron-computer".into(),
+                serde_json::json!({"type": "http", "url": url}),
+            );
+            cmd.env(crate::COMPUTER_ENV, url);
+        }
+        if !mcp_servers.is_empty() {
+            cmd.arg("--mcp-config")
+                .arg(serde_json::json!({"mcpServers": mcp_servers}).to_string());
         }
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);

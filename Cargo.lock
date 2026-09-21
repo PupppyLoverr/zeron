@@ -9226,6 +9226,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "futures-util",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]
@@ -11737,10 +11738,36 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
+ "zeron-computer",
  "zeron-engine",
  "zeron-rpc",
  "zeron-ui",
  "zeron-update",
+]
+
+[[package]]
+name = "zeron-computer"
+version = "0.2.80"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "core-foundation 0.10.1",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+ "windows-sys 0.61.2",
+ "zeron-proto",
 ]
 
 [[package]]
@@ -11786,6 +11813,7 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
+ "zeron-computer",
  "zeron-doc",
  "zeron-harness",
  "zeron-preview",

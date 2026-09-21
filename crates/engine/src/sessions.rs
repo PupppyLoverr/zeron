@@ -147,6 +147,10 @@ struct Inner {
     /// Host-local embedded-browser leases (RegisterBrowser IPC; never
     /// relay-forwarded, never persisted).
     browsers: Mutex<crate::browser::BrowserRegistry>,
+    /// Zeron Computer service (feature `computer`; set once at assembly).
+    /// Its endpoint is stamped onto local runs only while enabled + live.
+    #[cfg(feature = "computer")]
+    computer: OnceLock<zeron_computer::ComputerService>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
     /// doc-host reference each other through Arcs, so this back-edge must be
     /// severable for a replaced engine graph to drop.
@@ -199,6 +203,8 @@ impl SessionsEngine {
                 journal,
                 registry,
                 browsers: Mutex::new(Default::default()),
+                #[cfg(feature = "computer")]
+                computer: OnceLock::new(),
                 doc_host: Mutex::new(None),
                 runs: Mutex::new(HashMap::new()),
                 hubs: Mutex::new(HashMap::new()),
@@ -233,6 +239,12 @@ impl SessionsEngine {
     /// A live desktop viewport renews its embedded-browser lease over local IPC.
     pub fn register_browser(&self, url: &str) -> Result<(), String> {
         lock(&self.inner.browsers).renew(url, std::time::Instant::now())
+    }
+
+    /// Wire the computer service (called once at engine assembly).
+    #[cfg(feature = "computer")]
+    pub fn set_computer(&self, computer: zeron_computer::ComputerService) {
+        let _ = self.inner.computer.set(computer);
     }
 
     /// Bind generated-image intake to the same profile store used by attachment RPCs.
@@ -385,6 +397,19 @@ impl SessionsEngine {
         // stale or remote-stamped endpoints are removed rather than
         // forwarded into a local run.
         lock(&self.inner.browsers).prepare(&mut request, std::time::Instant::now());
+        // Zeron Computer rides the same seam: engine-stamped only, only while
+        // the service is enabled + ready on THIS host, and always re-stamped
+        // so a stale/remote endpoint can never survive into a local run.
+        request.model_options.remove(zeron_proto::COMPUTER_OPTION);
+        #[cfg(feature = "computer")]
+        if let Some(computer) = self.inner.computer.get()
+            && let Some(url) = computer.endpoint_url()
+        {
+            request.model_options.insert(
+                zeron_proto::COMPUTER_OPTION.into(),
+                serde_json::json!({ "url": url }),
+            );
+        }
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
@@ -1529,6 +1554,8 @@ async fn drive_run(
     // routing guidance is prepended only to what the model sees, and only
     // when the run carries a live embedded-browser stamp.
     zeron_harness::prepare_browser_prompt(&mut request);
+    #[cfg(feature = "computer")]
+    zeron_harness::prepare_computer_prompt(&mut request);
     // Startup can stop before the SDK saves user text, with no new session
     // ID or receipt. Bridge that unacknowledged tail from our transcript;
     // a fresh session needs all prior user text, not just the latest tail.

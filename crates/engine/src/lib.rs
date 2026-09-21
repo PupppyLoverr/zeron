@@ -138,6 +138,10 @@ pub struct EngineCore {
     pub diff_sync: CheckoutDiffSync,
     pub spaces_sync: SpacesSync,
     pub uploads: Uploads,
+    /// Zeron Computer — the device-local desktop perception/control service
+    /// (Cua driver). IPC-only; never relay-forwarded to another device.
+    #[cfg(feature = "computer")]
+    pub computer: zeron_computer::ComputerService,
     pub agent_accounts: AgentAccounts,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
@@ -280,6 +284,18 @@ impl EngineCore {
         // Queued-attachment support: the doc host resolves `pending://` refs
         // against this store and pushes staged bytes to remote hosts.
         doc_host.set_uploads(uploads.clone());
+        // Zeron Computer — one service per device. Screenshots staged under
+        // the uploads jail so `ReadAttachmentChunk` serves them like any
+        // other upload; the endpoint is stamped onto local runs by sessions.
+        #[cfg(feature = "computer")]
+        let computer = {
+            let computer = zeron_computer::ComputerService::new(
+                data_dir.to_path_buf(),
+                profile.uploads_root().join("computer"),
+            );
+            sessions.set_computer(computer.clone());
+            computer
+        };
         let agent_accounts_config = AgentAccountsConfig::detect(data_dir);
         sessions.set_generated_images(
             uploads.clone(),
@@ -324,6 +340,8 @@ impl EngineCore {
             diff_sync,
             spaces_sync,
             uploads,
+            #[cfg(feature = "computer")]
+            computer,
             agent_accounts,
             device_id,
             local_import,
@@ -460,6 +478,10 @@ impl EngineCore {
         )
         .with_auth(self.auth())
         .with_previews(self.previews.clone());
+        #[cfg(feature = "computer")]
+        {
+            rpc = rpc.with_computer(self.computer.clone());
+        }
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }

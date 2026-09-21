@@ -550,6 +550,11 @@ pub struct EngineRpc {
     terminals: Terminals,
     project_actions: ProjectActionsStore,
     previews: Option<zeron_preview::PreviewService>,
+    /// Zeron Computer service (feature `computer`). IPC-only — its methods
+    /// are absent from `forwardable`, so a remote device can never drive
+    /// THIS machine's physical desktop through relay.
+    #[cfg(feature = "computer")]
+    computer: Option<zeron_computer::ComputerService>,
     change_requests: CheckoutChangeRequests,
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
@@ -594,6 +599,8 @@ impl EngineRpc {
             terminals,
             project_actions,
             previews: None,
+            #[cfg(feature = "computer")]
+            computer: None,
             change_requests,
             diff_sync,
             uploads,
@@ -609,6 +616,20 @@ impl EngineRpc {
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
         self.previews = Some(previews);
         self
+    }
+
+    /// Attach the Zeron Computer service (feature `computer`).
+    #[cfg(feature = "computer")]
+    pub fn with_computer(mut self, computer: zeron_computer::ComputerService) -> Self {
+        self.computer = Some(computer);
+        self
+    }
+
+    #[cfg(feature = "computer")]
+    fn computer(&self) -> Result<&zeron_computer::ComputerService, RpcError> {
+        self.computer
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("computer service unavailable".into()))
     }
 
     /// Attach the auth service (AuthStatus + AuthRpc mutations).
@@ -1107,7 +1128,49 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
             | methods::WATCH_WORKSPACE_FILES
             | methods::UPDATE_STATUS
+            // Device-local (never reaches `forward`), listed for completeness.
+            | methods::WATCH_COMPUTER
     )
+}
+
+/// Map a classified computer error onto the wire — the stable machine
+/// code rides inside the message as `[code] …` so a settings surface can
+/// match remediation hints without a dedicated error channel.
+#[cfg(feature = "computer")]
+fn computer_error(e: zeron_computer::ComputerError) -> RpcError {
+    RpcError::Failed(format!("[{}] {}", e.code(), e.message()))
+}
+
+/// `WatchComputer`: `{status, install}` snapshots — current value first,
+/// then one per status change or install-progress tick, whichever fires.
+#[cfg(feature = "computer")]
+fn computer_stream(
+    service: zeron_computer::ComputerService,
+) -> BoxStream<'static, serde_json::Value> {
+    futures::stream::unfold(
+        (
+            service.subscribe_status(),
+            service.subscribe_install(),
+            service,
+            false,
+        ),
+        |(mut status_rx, mut install_rx, service, emitted)| async move {
+            if emitted {
+                tokio::select! {
+                    changed = status_rx.changed() => changed.ok()?,
+                    changed = install_rx.changed() => changed.ok()?,
+                }
+            }
+            let install = install_rx.borrow_and_update().clone();
+            let value = serde_json::to_value(serde_json::json!({
+                "status": service.status(),
+                "install": install,
+            }))
+            .ok()?;
+            Some((value, (status_rx, install_rx, service, true)))
+        },
+    )
+    .boxed()
 }
 
 /// A watch receiver as a stream: current value first, then every change.
@@ -1376,6 +1439,46 @@ impl RpcService for EngineRpc {
                     .register_browser(url)
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({"ok": true}))
+            }
+            // Zeron Computer (feature `computer`): device-local like
+            // RegisterBrowser — none of these are in `forwardable`, so a
+            // remote device can never act on THIS machine's desktop.
+            #[cfg(feature = "computer")]
+            methods::COMPUTER_STATUS => RpcReply::value(&self.computer()?.status()),
+            #[cfg(feature = "computer")]
+            methods::COMPUTER_SET_SETTINGS => {
+                let settings: zeron_computer::ComputerSettings = parse_params(params)?;
+                self.computer()?
+                    .set_settings(settings)
+                    .map_err(computer_error)?;
+                RpcReply::value(&self.computer()?.status())
+            }
+            #[cfg(feature = "computer")]
+            methods::COMPUTER_INSTALL => {
+                // Replies immediately — progress + failure ride WatchComputer.
+                self.computer()?.start_install().map_err(computer_error)?;
+                RpcReply::value(&self.computer()?.status())
+            }
+            #[cfg(feature = "computer")]
+            methods::COMPUTER_UNINSTALL => {
+                self.computer()?.uninstall().await.map_err(computer_error)?;
+                RpcReply::value(&self.computer()?.status())
+            }
+            #[cfg(feature = "computer")]
+            methods::COMPUTER_PROBE => RpcReply::value(&self.computer()?.probe().await),
+            #[cfg(feature = "computer")]
+            methods::COMPUTER_OBSERVE => {
+                let observation = self
+                    .computer()?
+                    .observe(params)
+                    .await
+                    .map_err(computer_error)?;
+                RpcReply::value(&observation)
+            }
+            #[cfg(feature = "computer")]
+            methods::WATCH_COMPUTER => {
+                let service = self.computer()?.clone();
+                Ok(RpcReply::Stream(computer_stream(service)))
             }
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
@@ -2868,6 +2971,10 @@ mod tests {
     fn local_device_is_not_forwardable() {
         assert!(!forwardable(methods::LOCAL_DEVICE));
         assert!(!forwardable(methods::REGISTER_BROWSER));
+        assert!(!forwardable(methods::COMPUTER_STATUS));
+        assert!(!forwardable(methods::COMPUTER_OBSERVE));
+        assert!(is_stream_method(methods::WATCH_COMPUTER));
+        assert!(!forwardable(methods::WATCH_COMPUTER));
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));

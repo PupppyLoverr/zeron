@@ -63,6 +63,15 @@ enum Command {
         #[arg(long)]
         url: String,
     },
+    /// Stdio MCP front for Zeron Computer — spawned by harnesses that speak
+    /// MCP over stdio but not HTTP; proxies the engine's loopback endpoint.
+    /// stdout is protocol traffic, so it dispatches before logging installs.
+    #[cfg(feature = "computer")]
+    ComputerStdio {
+        /// Loopback MCP endpoint stamped on the run request.
+        #[arg(long)]
+        url: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -129,6 +138,10 @@ fn main() -> anyhow::Result<()> {
     // tracing layer (which writes to stdout) installs.
     if let Some(Command::BrowserBridge { url }) = &cli.command {
         return zeron_ui::browser::bridge::serve_stdio(url);
+    }
+    #[cfg(feature = "computer")]
+    if let Some(Command::ComputerStdio { url }) = &cli.command {
+        return zeron_computer::stdio::serve_stdio(url);
     }
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
@@ -228,6 +241,10 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::BrowserBridge { .. }) => {
             unreachable!("browser-bridge dispatches before tracing init")
+        }
+        #[cfg(feature = "computer")]
+        Some(Command::ComputerStdio { .. }) => {
+            unreachable!("computer-stdio dispatches before tracing init")
         }
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env().data_dir),

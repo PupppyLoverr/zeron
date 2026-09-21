@@ -14,6 +14,7 @@ zeron-engine.workspace = true
 zeron-rpc.workspace = true
 zeron-ui.workspace = true
 zeron-update.workspace = true
+zeron-computer = { workspace = true, optional = true }
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
@@ -21,6 +22,11 @@ libc.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[features]
+# Device-local desktop perception/control (Cua driver). OFF by default:
+# no service, no computer_* RPCs, no MCP subprocess, no run stamping.
+computer = ["dep:zeron-computer", "zeron-engine/computer"]
 
 # The custom allocator is macOS-only (see main.rs): glibc measured flat on the
 # same streaming/scroll workloads, so Linux keeps the system allocator.
