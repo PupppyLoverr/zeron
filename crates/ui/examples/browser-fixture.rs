@@ -20,6 +20,7 @@ async fn pause(cx: &mut AsyncApp, ms: u64) {
 }
 
 fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let path = directory.join(format!("{name}.png"));
     #[cfg(target_os = "macos")]
     let status = {
