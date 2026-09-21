@@ -54,6 +54,15 @@ remain opaque because in-app backdrop blur is not supported. The pinned
 [Zui DirectX fix](https://github.com/zeronsh/zui/pull/7) supplies the renderer
 layout and edge-fade corrections.
 
+The sidebar browser embeds Microsoft Edge WebView2 as a child window of the
+GPUI surface and requires the
+[WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+(Evergreen) — preinstalled on Windows 11 and most patched Windows 10 systems.
+Each window's ephemeral profile lives under `%TEMP%` and is discarded with the
+session. The app sets `GPUI_DISABLE_DIRECT_COMPOSITION=1` at startup: gpui's
+topmost DirectComposition visual would otherwise composite above the child
+HWND and leave the page black.
+
 ## Verification
 
 [Windows CI](../../.github/workflows/windows.yml) builds the release application

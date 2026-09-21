@@ -128,6 +128,19 @@ impl gpui::Global for ReopenState {}
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
 /// root view, boot splash overlaid until the engine reports ready.
 pub fn run_app(config: UiConfig) {
+    // WebView2 pages are child HWNDs of the gpui window, but gpui binds its
+    // DirectComposition visual tree with `topmost = TRUE` — it composites
+    // ABOVE every child HWND, so a loaded page paints black underneath the
+    // swapchain. `GPUI_DISABLE_DIRECT_COMPOSITION` drops the window to the
+    // classic hwnd-bound swapchain (no WS_EX_NOREDIRECTIONBITMAP), where
+    // child HWNDs layer normally. Must be set before the platform is built;
+    // an explicit user value wins so the DComp path stays debuggable.
+    #[cfg(target_os = "windows")]
+    if std::env::var_os("GPUI_DISABLE_DIRECT_COMPOSITION").is_none() {
+        // SAFETY: single-threaded pre-platform-init write; the platform reads
+        // the var once in `WindowsPlatform::new`, after this call.
+        unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1") };
+    }
     // Retain ownership for the whole application lifetime. The bridge's
     // default runtime has only two workers, insufficient for a desktop engine.
     let runtime = tokio::runtime::Runtime::new().expect("desktop Tokio runtime");

@@ -3,10 +3,14 @@
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 #[cfg(target_os = "linux")]
 use linux as native;
 #[cfg(target_os = "macos")]
 use macos as native;
+#[cfg(target_os = "windows")]
+use windows as native;
 pub mod model;
 mod view;
 
@@ -70,12 +74,12 @@ pub enum BrowserEvent {
 /// A window/profile's ephemeral website data, allocated on first navigation.
 #[derive(Clone, Default)]
 pub struct BrowserContext {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     data: native::BrowserData,
 }
 
 pub struct BrowserSurface {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     context: BrowserContext,
     address: Entity<ComposerInput>,
     focus: FocusHandle,
@@ -95,11 +99,24 @@ pub struct BrowserSurface {
     #[cfg(target_os = "macos")]
     right_occlusion: gpui::Pixels,
     _input_sub: Subscription,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    /// FIFO replies for `evaluate` — every platform answers evaluations in
+    /// submission order, so a drained queue is enough to pair them up.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    eval_waiters: std::collections::VecDeque<tokio::sync::oneshot::Sender<serde_json::Value>>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    shot_waiters: std::collections::VecDeque<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     native: Option<native::NativePage>,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    /// A WebView2 build in flight. `build_as_child` pumps the Win32
+    /// message loop, so creation runs on a foreground task — gpui only
+    /// polls those while the `App` cell is unborrowed, letting the nested
+    /// loop dispatch queued work safely. The latest navigation, and any
+    /// shortcuts pushed mid-build, replay when the page lands.
+    #[cfg(target_os = "windows")]
+    pending_native: Option<PendingNative>,
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     native_tx: tokio::sync::mpsc::Sender<native::NativeEvent>,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     _native_task: gpui::Task<()>,
     #[cfg(target_os = "macos")]
     favicon_task: Option<gpui::Task<()>>,
@@ -135,9 +152,9 @@ impl BrowserSurface {
                 cx.notify();
             }
         });
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         let (native_tx, mut events) = tokio::sync::mpsc::channel(64);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         let native_task = cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.recv().await {
                 if this
@@ -150,10 +167,10 @@ impl BrowserSurface {
                 }
             }
         });
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         let _ = (window, context);
         Self {
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             context,
             address,
             focus: cx.focus_handle(),
@@ -173,11 +190,17 @@ impl BrowserSurface {
             #[cfg(target_os = "macos")]
             right_occlusion: gpui::px(0.0),
             _input_sub: input_sub,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            eval_waiters: Default::default(),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            shot_waiters: Default::default(),
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             native: None,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(target_os = "windows")]
+            pending_native: None,
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             native_tx,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             _native_task: native_task,
             #[cfg(target_os = "macos")]
             favicon_task: None,
@@ -193,22 +216,28 @@ impl BrowserSurface {
         self.remote = remote;
     }
     pub fn set_shortcuts(&mut self, keymap: &crate::settings::KeymapConfig) {
-        #[cfg(target_os = "macos")]
-        if let Some(native) = &self.native {
-            native.set_shortcuts(
-                crate::settings::ShortcutId::ALL
-                    .iter()
-                    .filter(|id| **id != crate::settings::ShortcutId::SaveFile)
-                    .map(|id| crate::settings::platform_combo(keymap.get(*id)))
-                    .collect(),
-            );
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let shortcuts: Vec<String> = crate::settings::ShortcutId::ALL
+                .iter()
+                .filter(|id| **id != crate::settings::ShortcutId::SaveFile)
+                .map(|id| crate::settings::platform_combo(keymap.get(*id)))
+                .collect();
+            // An in-flight WebView2 build applies them when the page lands.
+            #[cfg(target_os = "windows")]
+            if let Some(pending) = &mut self.pending_native {
+                pending.shortcuts = Some(shortcuts.clone());
+            }
+            if let Some(native) = &self.native {
+                native.set_shortcuts(shortcuts);
+            }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let _ = keymap;
     }
 
     pub fn focus_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(native) = &self.native {
             native.focus_chrome();
         }
@@ -239,7 +268,7 @@ impl BrowserSurface {
             return;
         }
         self.presentation = presentation;
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         if let Some(native) = &mut self.native {
             native.present(presentation);
         }
@@ -331,7 +360,7 @@ impl BrowserSurface {
         self.page.title.clear();
         self.page.error = None;
         self.clear_favicon(cx);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         {
             #[cfg(target_os = "macos")]
             {
@@ -341,12 +370,7 @@ impl BrowserSurface {
             let result = if let Some(native) = &self.native {
                 native.load(&url)
             } else {
-                native::NativePage::new(window, &self.context.data, self.native_tx.clone())
-                    .map(|mut native| {
-                        native.present(self.presentation);
-                        self.native = Some(native);
-                    })
-                    .and_then(|_| self.native.as_ref().unwrap().load(&url))
+                self.create_native(&url, window, cx)
             };
             self.page.loading = result.is_ok();
             if let Err(error) = result {
@@ -354,7 +378,7 @@ impl BrowserSurface {
             }
             window.focus(&self.focus, cx);
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             let _ = window;
             cx.open_url(&url);
@@ -363,13 +387,96 @@ impl BrowserSurface {
         cx.notify();
     }
 
+    /// Attach the native page and start `url` — synchronous here: neither
+    /// platform pumps the window's message loop while building, so running
+    /// inside the current `App` borrow is safe.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn create_native(
+        &mut self,
+        url: &str,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        native::NativePage::new(window, &self.context.data, self.native_tx.clone())
+            .map(|mut native| {
+                native.present(self.presentation);
+                self.native = Some(native);
+            })
+            .and_then(|_| self.native.as_ref().unwrap().load(url))
+    }
+
+    /// WebView2's `build_as_child` pumps the Win32 message loop while the
+    /// environment and controller come up. Run under the `App` borrow an
+    /// event or update callback holds, that pump dispatches queued gpui
+    /// tasks — which then panic on the second `AppCell` borrow and abort
+    /// across the `CallWindowProcW` boundary. The build therefore runs on
+    /// a foreground task, which gpui only polls with the cell unborrowed;
+    /// the page lands back in context and replays the pending target.
+    #[cfg(target_os = "windows")]
+    fn create_native(
+        &mut self,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if let Some(pending) = &mut self.pending_native {
+            pending.url = url.to_owned();
+            return Ok(());
+        }
+        let parent = native::ParentWindow::of(window)?;
+        let data = self.context.data.clone();
+        let tx = self.native_tx.clone();
+        self.pending_native = Some(PendingNative {
+            url: url.to_owned(),
+            shortcuts: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            // The task body runs with no `App` borrow held, so the message
+            // pump inside `NativePage::new` is free to dispatch queued gpui
+            // work — including this entity's own event handlers — without
+            // re-entering a borrowed `AppCell`.
+            let created = native::NativePage::new(&parent, &data, tx);
+            let _ = this.update_in(cx, |this, _, cx| {
+                if let Some(pending) = this.pending_native.take() {
+                    match created {
+                        Ok(mut native) => {
+                            native.present(this.presentation);
+                            if let Some(shortcuts) = pending.shortcuts {
+                                native.set_shortcuts(shortcuts);
+                            }
+                            let result = native.load(&pending.url);
+                            this.page.loading = result.is_ok();
+                            if let Err(error) = result {
+                                this.page.error =
+                                    Some(format!("Could not open this page: {error}"));
+                            }
+                            this.native = Some(native);
+                        }
+                        Err(error) => {
+                            this.page.loading = false;
+                            this.page.error = Some(format!("Could not open this page: {error}"));
+                        }
+                    }
+                } else {
+                    // `close` ran while the host was building — the page
+                    // drops rather than attaching to a closed surface.
+                    this.page.loading = false;
+                }
+                cx.emit(BrowserEvent::Changed);
+                cx.notify();
+            });
+        })
+        .detach();
+        Ok(())
+    }
+
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url = self.address.read(cx).text().to_owned();
         self.navigate(&url, window, cx);
     }
 
-    fn reload(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         if let Some(native) = &self.native {
             if self.page.error.is_some() {
                 if let Some(url) = &self.page.url {
@@ -380,7 +487,7 @@ impl BrowserSurface {
             }
             self.page.error = None;
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         self.open_external(cx);
         cx.notify();
     }
@@ -396,13 +503,92 @@ impl BrowserSurface {
         }
     }
 
-    fn history(&mut self, forward: bool) {
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn history(&mut self, forward: bool) {
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         if let Some(native) = &self.native {
             native.history(forward);
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         let _ = forward;
+    }
+
+    /// Run a JavaScript expression in the live page and answer with its JSON
+    /// value. The reply resolves `{ok:true, v:<result>}` or
+    /// `{ok:false, e:<error>}` — every platform funnels the return value
+    /// through a JSON string so types survive the native boundary.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn evaluate(
+        &mut self,
+        expression: &str,
+        reply: tokio::sync::oneshot::Sender<serde_json::Value>,
+    ) {
+        let Some(native) = &self.native else {
+            let _ = reply.send(serde_json::json!({"ok":false,"e":"No page is loaded"}));
+            return;
+        };
+        self.eval_waiters.push_back(reply);
+        let script = format!(
+            "(()=>{{try{{var v=({expression});return JSON.stringify({{ok:true,v:v===undefined?null:v}})}}catch(e){{return JSON.stringify({{ok:false,e:String(e)}})}}}})()"
+        );
+        native.evaluate(&script);
+    }
+
+    /// PNG bytes of the visible page. macOS/Windows snapshot the native
+    /// view; Linux re-encodes the latest composited frame.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn screenshot(&mut self, reply: tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>) {
+        #[cfg(target_os = "linux")]
+        {
+            let result = self
+                .native
+                .as_ref()
+                .ok_or_else(|| "No page is loaded".to_string())
+                .and_then(|native| native.screenshot());
+            let _ = reply.send(result);
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let Some(native) = &self.native else {
+                let _ = reply.send(Err("No page is loaded".into()));
+                return;
+            };
+            self.shot_waiters.push_back(reply);
+            native.screenshot();
+        }
+    }
+
+    /// Platforms without an embedded page answer eval/screenshot with a
+    /// clear error so callers degrade instead of hanging.
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    pub fn evaluate(
+        &mut self,
+        _expression: &str,
+        reply: tokio::sync::oneshot::Sender<serde_json::Value>,
+    ) {
+        let _ = reply.send(
+            serde_json::json!({"ok":false,"e":"Embedded browser is not available on this platform"}),
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    pub fn screenshot(&mut self, reply: tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>) {
+        let _ = reply.send(Err(
+            "Embedded browser is not available on this platform".into()
+        ));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn handle_eval_result(&mut self, value: serde_json::Value) {
+        if let Some(reply) = self.eval_waiters.pop_front() {
+            let _ = reply.send(value);
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn handle_screenshot(&mut self, result: Result<Vec<u8>, String>) {
+        if let Some(reply) = self.shot_waiters.pop_front() {
+            let _ = reply.send(result);
+        }
     }
 
     /// Explicitly close even if an async callback temporarily retains an entity.
@@ -415,7 +601,7 @@ impl BrowserSurface {
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.set_presentation(Presentation::Hidden, cx);
         self.clear_favicon(cx);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         {
             if let Some(native) = &mut self.native {
                 native.present(Presentation::Hidden);
@@ -425,6 +611,12 @@ impl BrowserSurface {
                 cx.defer(move |cx| gpui::ImageSource::Render(image).evict(None, cx));
             }
             self.native = None;
+            // Cancels an in-flight WebView2 build: it drops on landing
+            // instead of attaching to a closed surface.
+            #[cfg(target_os = "windows")]
+            {
+                self.pending_native = None;
+            }
             #[cfg(target_os = "macos")]
             {
                 self.favicon_task = None;
@@ -495,6 +687,8 @@ impl BrowserSurface {
                     });
                 }
             }
+            native::NativeEvent::EvalResult(value) => self.handle_eval_result(value),
+            native::NativeEvent::Screenshot(result) => self.handle_screenshot(result),
             native::NativeEvent::Favicon { page, url } => {
                 if self.page.url.as_deref() != Some(&page) || !model::allowed_navigation(&url) {
                     return;
@@ -553,6 +747,90 @@ impl BrowserSurface {
     }
 }
 
+#[cfg(target_os = "windows")]
+impl BrowserSurface {
+    fn on_native_event(
+        &mut self,
+        event: native::NativeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(native) = &mut self.native else {
+            return;
+        };
+        match event {
+            native::NativeEvent::Changed | native::NativeEvent::Finished => {
+                let mut page = native.state();
+                // A failed provisional request has no committed WebView2 URL.
+                if page.url.is_none() {
+                    page.url = self.page.url.clone();
+                }
+                if page.error.is_some() {
+                    page.loading = false;
+                }
+                if !self.address.focus_handle(cx).is_focused(window) {
+                    if let Some(url) = &page.url
+                        && self.address.read(cx).text() != url
+                    {
+                        self.address
+                            .update(cx, |input, cx| input.set_text(url.clone(), cx));
+                    }
+                    self.address_edited = false;
+                }
+                native.present(self.presentation);
+                if page != self.page {
+                    self.page = page;
+                    cx.emit(BrowserEvent::Changed);
+                }
+                cx.notify();
+            }
+            native::NativeEvent::NewTab(url) => {
+                if self.presentation == Presentation::Live {
+                    cx.emit(BrowserEvent::NewTab(Some(url)));
+                }
+            }
+            native::NativeEvent::Key(key) => {
+                if self.presentation == Presentation::Live {
+                    window.focus(&self.focus, cx);
+                    window.defer(cx, move |window, cx| {
+                        window.dispatch_keystroke(key, cx);
+                    });
+                }
+            }
+            native::NativeEvent::EvalResult(value) => self.handle_eval_result(value),
+            native::NativeEvent::Screenshot(result) => self.handle_screenshot(result),
+        }
+    }
+}
+
+/// State for an in-flight WebView2 build; see the `pending_native` field
+/// for why creation is deferred to a foreground task.
+#[cfg(target_os = "windows")]
+struct PendingNative {
+    /// Latest navigation target — re-navigating mid-build just retargets.
+    url: String,
+    /// App chords pushed while the build was in flight.
+    shortcuts: Option<Vec<String>>,
+}
+
+/// Every platform returns the evaluated script's *string* result — the
+/// caller-side wrapper JSON-encodes the real value into that string, so the
+/// native boundary only ever ferries text. Windows and Linux then JSON-wrap
+/// the string once more (wry's callback / `jsc_value_to_json`), which is why
+/// decoding unwraps string layers until a structured value appears.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn decode_eval(raw: &str) -> serde_json::Value {
+    let mut value = serde_json::from_str::<serde_json::Value>(raw)
+        .unwrap_or_else(|_| serde_json::Value::String(raw.to_string()));
+    while let serde_json::Value::String(inner) = &value {
+        match serde_json::from_str::<serde_json::Value>(inner) {
+            Ok(deeper) => value = deeper,
+            Err(_) => break,
+        }
+    }
+    value
+}
+
 #[cfg(feature = "browser-fixture")]
 impl BrowserSurface {
     pub fn fixture_history(&mut self, forward: bool) {
@@ -602,7 +880,11 @@ impl BrowserSurface {
             self.presentation != Presentation::Hidden
                 && self.native.as_ref().is_some_and(|n| n.image.is_some())
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        {
+            self.presentation != Presentation::Hidden && self.native.is_some()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             false
         }
@@ -623,6 +905,13 @@ impl BrowserSurface {
     pub fn fixture_geometry(&self) -> (f32, f32, f32) {
         self.native.as_ref().unwrap().fixture_geometry()
     }
+    #[cfg(target_os = "windows")]
+    pub fn fixture_host_info(&self) -> String {
+        self.native
+            .as_ref()
+            .map(|native| native.host_info())
+            .unwrap_or_else(|| "no native page".into())
+    }
     pub fn fixture_eval(&self, script: &str) {
         #[cfg(target_os = "macos")]
         if let Some(native) = &self.native {
@@ -632,7 +921,11 @@ impl BrowserSurface {
         if let Some(native) = &self.native {
             native.evaluate(script);
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        if let Some(native) = &self.native {
+            native.evaluate(script);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         let _ = script;
     }
 }

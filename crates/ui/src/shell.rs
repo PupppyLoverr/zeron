@@ -2876,7 +2876,11 @@ impl Shell {
                 LinkAction::External
             };
         }
-        let outcome = resolved.web_outcome(cfg!(any(target_os = "macos", target_os = "linux")));
+        let outcome = resolved.web_outcome(cfg!(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )));
         if outcome == LinkOutcome::Internal {
             self.set_surfaces_open(true, cx);
             self.add_browser_surface(activation.target.navigation.clone().ok(), window, cx);
