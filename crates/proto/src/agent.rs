@@ -23,6 +23,8 @@ pub enum HarnessId {
     /// google's antigravity agent over acp (`agy_acp_server`, installed from
     /// its pinned release archive).
     Antigravity,
+    /// Moonshot AI's Kimi Code CLI, driven over ACP (`kimi acp`).
+    KimiCode,
     /// Test harness; never shown in production pickers.
     Mock,
 }

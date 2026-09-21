@@ -217,6 +217,8 @@ icon_assets![
     (PI_MARK, "pi-mark"),
     (OPENCODE_MARK, "opencode-mark"),
     (ANTIGRAVITY_MARK, "antigravity-mark"),
+    // Kimi's "K" mark (lobe-icons kimi.svg), monochrome.
+    (KIMI_MARK, "kimi-mark"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

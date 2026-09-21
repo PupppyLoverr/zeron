@@ -3,10 +3,12 @@
 //!
 //! KEPT ONLY for agents built ground-up on ACP: Grok ([`AcpHarness::grok`],
 //! `grok agent stdio`), Devin ([`AcpHarness::devin`], `devin acp`) and Hermes
-//! ([`AcpHarness::hermes`], `hermes acp`) and Antigravity
+//! ([`AcpHarness::hermes`], `hermes acp`), Antigravity
 //! ([`AcpHarness::antigravity`], Google's `agy_acp_server`, installed from its
-//! pinned release archive) — plus pi ([`AcpHarness::pi`]) via the community
-//! `pi-acp` adapter until a native driver exists. Claude, Codex and Cursor moved to native drivers
+//! pinned release archive) and Kimi Code
+//! ([`AcpHarness::kimi`], `kimi acp`) — plus pi
+//! ([`AcpHarness::pi`]) via the community `pi-acp` adapter until a native
+//! driver exists. Claude, Codex and Cursor moved to native drivers
 //! ([`crate::ClaudeHarness`], [`crate::CodexHarness`], [`crate::CursorHarness`])
 //! after adapter-mediated ACP kept manufacturing done-status bugs the native
 //! wires don't have (turn-hold bookkeeping vs the CLI's own eager result).
@@ -469,6 +471,87 @@ fn pi_spec() -> AcpAgentSpec {
     }
 }
 
+/// Kimi Code's install dirs: the official installers (install.sh /
+/// install.ps1) default `KIMI_INSTALL_DIR` to `~/.kimi-code` on every
+/// platform with the binary in `bin/`; the npm-global alternative
+/// (`npm i -g @moonshot-ai/kimi-code`) lands in the usual npm bins.
+fn kimi_install_paths() -> Vec<PathBuf> {
+    let mut dirs = npm_global_bins("kimi");
+    if let Some(home) = crate::executable::home_dir() {
+        dirs.push(home.join(".kimi-code").join("bin").join("kimi"));
+    }
+    dirs
+}
+
+fn kimi_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::KimiCode,
+        display_name: "Kimi Code",
+        executable: "kimi",
+        env_override: "KIMI_EXECUTABLE",
+        // `kimi acp` is the CLI's native multi-session ACP server — there is
+        // no adapter to managed-install, and `kimi login` has to come first
+        // anyway (session/new answers AUTH_REQUIRED without it).
+        args: &["acp"],
+        npm_package: None,
+        archive: None,
+        extra_paths: kimi_install_paths,
+        cli_executable: "kimi",
+        cli_extra_paths: kimi_install_paths,
+        install_hint: "kimi (searched PATH, the login shell's PATH, ~/.kimi-code/bin, \
+             npm global bins, /opt/homebrew/bin, /usr/local/bin, and \
+             fnm/nvm/volta/pnpm/bun install dirs; install with \
+             `curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash` or \
+             `npm install -g @moonshot-ai/kimi-code`, then `kimi login`; set \
+             KIMI_EXECUTABLE to override)",
+        // session/new's `model` config option carries the user's configured
+        // catalog (the managed kimi-code rows plus every provider model) —
+        // discovered live; these managed entries are the static fallback.
+        // Ids are the bare model-registry ids the option advertises.
+        models: || {
+            vec![
+                Model {
+                    id: "k3".into(),
+                    label: "Kimi K3".into(),
+                    description: Some("Moonshot's flagship coding model — 1M context".into()),
+                    reasoning_levels: vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::High,
+                        ReasoningLevel::Max,
+                    ],
+                    options: Vec::new(),
+                },
+                Model {
+                    id: "kimi-for-coding".into(),
+                    label: "Kimi K2.7 Code".into(),
+                    description: Some("Kimi's coding model for routine development".into()),
+                    reasoning_levels: Vec::new(),
+                    options: Vec::new(),
+                },
+            ]
+        },
+        // No `_session/steering` extension: steers deliver at turn boundaries.
+        steering_mode: SteeringMode::TurnBoundary,
+        // k3's graded `thinking` ladder (support_efforts low/high/max);
+        // boolean-thinking models collapse to the wire's on/off instead.
+        reasoning_levels: &[
+            ReasoningLevel::Low,
+            ReasoningLevel::High,
+            ReasoningLevel::Max,
+        ],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "The agent process is likely wedged.",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
+    }
+}
+
 /// google's builds as the acp registry lists them (`antigravity-acp`); `None`
 /// on platforms without one, where only an explicit override can launch.
 fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
@@ -903,6 +986,11 @@ impl AcpHarness {
     /// google antigravity over its acp server (`agy_acp_server`).
     pub fn antigravity() -> Self {
         Self::with_spec(antigravity_spec())
+    }
+
+    /// Kimi Code (`kimi acp`) — Moonshot AI's native multi-session ACP server.
+    pub fn kimi() -> Self {
+        Self::with_spec(kimi_spec())
     }
 
     /// sign the agent out with acp `logout`, clearing the credentials its
@@ -3856,6 +3944,26 @@ mod tests {
                 {"id": "gemini-api-key"}
             ]
         })
+    }
+
+    #[test]
+    fn kimi_reports_installed_through_a_fixture_binary_override() {
+        // `kimi` is rarely on CI/VM PATHs: the env override and the explicit
+        // `with_executable` path are what users and tests reach for, and both
+        // funnel through the same override validation.
+        let dir = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) { "kimi.cmd" } else { "kimi" };
+        let fixture = dir.path().join(name);
+        std::fs::write(&fixture, b"").unwrap();
+        assert!(AcpHarness::kimi().with_executable(&fixture).installed());
+    }
+
+    #[test]
+    fn kimi_install_paths_cover_the_official_and_npm_dirs() {
+        let paths = kimi_install_paths();
+        assert!(paths.iter().any(|p| p.ends_with(".kimi-code/bin/kimi")));
+        // npm-global bins are searched too (the npm i -g install shape).
+        assert!(paths.len() > 1);
     }
 
     fn settings_holding(body: &str) -> (tempfile::TempDir, PathBuf) {

@@ -622,6 +622,27 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::AcpHarness::antigravity().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::antigravity()) as Arc<dyn Harness>)),
     );
+    // Kimi Code over ACP (`kimi acp`), same lazy pattern: the static
+    // descriptor mirrors AcpHarness::kimi() exactly. No `_session/steering`
+    // extension (turn boundaries); the effort ladder rides the `thinking`
+    // config option's graded values (k3 advertises low/high/max).
+    registry.register_lazy(
+        HarnessDescriptor {
+            id: HarnessId::KimiCode,
+            name: "Kimi Code".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::TurnBoundary,
+            reasoning_levels: vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::High,
+                ReasoningLevel::Max,
+            ],
+            installed: true,
+            enabled: None,
+        },
+        Box::new(|| zeron_harness::AcpHarness::kimi().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::kimi()) as Arc<dyn Harness>)),
+    );
     registry
 }
 
@@ -702,7 +723,8 @@ mod tests {
                 HarnessId::Hermes,
                 HarnessId::Pi,
                 HarnessId::Opencode,
-                HarnessId::Antigravity
+                HarnessId::Antigravity,
+                HarnessId::KimiCode
             ]
         );
         assert!(registry.resolve(HarnessId::Mock).is_ok());
@@ -760,6 +782,19 @@ mod tests {
         assert_eq!(antigravity.display_name(), "Antigravity");
         assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
         assert!(antigravity.reasoning_levels().is_empty());
+        // Kimi Code mirrors its spec: graded low/high/max ladder on `thinking`.
+        let kimi = registry.resolve(HarnessId::KimiCode).unwrap();
+        assert_eq!(kimi.id(), HarnessId::KimiCode);
+        assert_eq!(kimi.display_name(), "Kimi Code");
+        assert_eq!(kimi.steering_mode(), SteeringMode::TurnBoundary);
+        assert_eq!(
+            kimi.reasoning_levels(),
+            &[
+                ReasoningLevel::Low,
+                ReasoningLevel::High,
+                ReasoningLevel::Max
+            ]
+        );
         let pi = registry.resolve(HarnessId::Pi).unwrap();
         assert_eq!(pi.id(), HarnessId::Pi);
         assert_eq!(pi.display_name(), "Pi");

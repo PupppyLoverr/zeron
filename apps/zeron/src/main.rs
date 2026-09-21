@@ -337,6 +337,7 @@ fn harness_from_env() -> zeron_engine::HarnessId {
         Ok("hermes") => zeron_engine::HarnessId::Hermes,
         Ok("pi") => zeron_engine::HarnessId::Pi,
         Ok("antigravity") => zeron_engine::HarnessId::Antigravity,
+        Ok("kimi" | "kimi-code") => zeron_engine::HarnessId::KimiCode,
         _ => zeron_engine::HarnessId::ClaudeCode,
     }
 }

@@ -1237,6 +1237,7 @@ impl Render for AccountsPage {
             HarnessId::Pi => (crate::icons::PI_MARK, None),
             HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
             HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
+            HarnessId::KimiCode => (crate::icons::KIMI_MARK, None),
             _ => (
                 crate::icons::CLAUDE_MARK,
                 Some(crate::icons::claude_brand()),
