@@ -4050,6 +4050,13 @@ pub struct Composer {
     /// they never show at once (mutually exclusive by token shape).
     popup_bar: crate::popover::MenuScrollbarState,
     pub(crate) current_key: String,
+    /// A composer bound to a fixed chat (the side-chat surface) resolves that
+    /// chat for every send-path read instead of the shell's selection.
+    target_chat: Option<String>,
+    /// One-shot context prefix for the first send in a bound composer (the
+    /// side chat's transcript-tail seed). Not echoed into the draft or the
+    /// queue row — it rides the RunRequest prompt alone.
+    pending_context: Option<String>,
     sending: bool,
     /// Armed immediately before a blank-canvas send selects its minted chat.
     /// The state observer consumes it to distinguish that handoff from normal
@@ -4296,6 +4303,8 @@ impl Composer {
             mention_scroll: gpui::ScrollHandle::new(),
             popup_bar: crate::popover::MenuScrollbarState::default(),
             current_key,
+            target_chat: None,
+            pending_context: None,
             sending: false,
             launching_new_chat: false,
             failure: None,
@@ -4387,6 +4396,44 @@ impl Composer {
             }
         }
         composer
+    }
+
+    /// A composer bound to a specific chat (the side-chat surface) — same
+    /// entity, same machinery, but the send target and all chat-keyed state
+    /// resolve to `chat_id` instead of the shell's selection. The optional
+    /// `context_seed` rides the first send's prompt only.
+    pub fn new_for_chat(
+        state: Entity<AppState>,
+        chat_id: String,
+        context_seed: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut composer = Self::new(state, cx);
+        composer.pickers.update(cx, |pickers, cx| {
+            pickers.set_chat_override(chat_id.clone(), cx)
+        });
+        composer.target_chat = Some(chat_id.clone());
+        composer.current_key = chat_id;
+        composer.pending_context = context_seed;
+        composer
+    }
+
+    /// The chat this composer drives: its bound side-chat target when set,
+    /// else the shell's selected conversation. EVERY chat-keyed read in the
+    /// send path goes through here so a bound composer is independent of
+    /// main-pane navigation.
+    fn target_chat_id(&self, state: &AppState) -> Option<String> {
+        self.target_chat
+            .clone()
+            .or_else(|| state.selected_chat.clone())
+    }
+
+    /// The bound/selected chat's workspace row.
+    fn target_chat_row<'a>(&self, state: &'a AppState) -> Option<&'a zeron_proto::Chat> {
+        match self.target_chat.as_deref() {
+            Some(id) => state.chat_row(id),
+            None => state.selected_chat_row(),
+        }
     }
 
     /// Capture-knob passthrough (`ZERON_OPEN_DIALOG=model`): open the
@@ -5099,7 +5146,7 @@ impl Composer {
             let state = self.state.read(cx);
             let mut params = serde_json::Map::new();
             params.insert("query".into(), token.query.clone().into());
-            let target = if let Some(chat) = state.selected_chat_row() {
+            let target = if let Some(chat) = self.target_chat_row(state) {
                 params.insert("chatId".into(), chat.id.clone().into());
                 Some(chat.device_id.clone())
             } else if let Some(space) = state.selected_space_row() {
@@ -5413,8 +5460,7 @@ impl Composer {
         };
         let target = {
             let state = self.state.read(cx);
-            state
-                .selected_chat_row()
+            self.target_chat_row(state)
                 .map(|chat| chat.device_id.clone())
                 .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))
         };
@@ -5719,7 +5765,9 @@ impl Composer {
         let (key, pending, edited_row_exists) = {
             let s = self.state.read(cx);
             (
-                s.selected_chat.clone().unwrap_or_default(),
+                // A bound composer (side chat) pins its draft key: shell
+                // navigation must never swap its text out from under it.
+                self.target_chat_id(s).unwrap_or_default(),
                 pending_input_request(&s.transcript),
                 editing_id
                     .as_ref()
@@ -5865,11 +5913,11 @@ impl Composer {
 
     pub(crate) fn run_live(&self, cx: &App) -> bool {
         let s = self.state.read(cx);
-        let Some(chat_id) = s.selected_chat.as_deref() else {
+        let Some(chat_id) = self.target_chat_id(s) else {
             return false;
         };
         matches!(
-            s.indicator_for(chat_id, chrono::Utc::now()),
+            s.indicator_for(&chat_id, chrono::Utc::now()),
             Indicator::Working | Indicator::AwaitingInput
         )
     }
@@ -5884,7 +5932,7 @@ impl Composer {
         if state.review_comment_flush_pending(&self.current_key) {
             return true;
         }
-        if state.selected_chat.is_some() {
+        if self.target_chat_id(state).is_some() {
             return false;
         }
         // New-chat canvas: needs a runnable agent. The
@@ -5972,7 +6020,9 @@ impl Composer {
         };
         // Chat id: existing selection, or client-minted for the new-chat canvas
         // (the chat then appears from the doc host once the doc materializes).
-        let (chat_id, is_new) = match self.state.read(cx).selected_chat.clone() {
+        // A bound composer (side chat) always targets its own chat — never
+        // the canvas.
+        let (chat_id, is_new) = match self.target_chat_id(self.state.read(cx)) {
             Some(id) => (id, false),
             None => (uuid::Uuid::new_v4().to_string(), true),
         };
@@ -5983,11 +6033,10 @@ impl Composer {
         // Fully-resolved model/reasoning/options — concrete values (chat config
         // or defaults), so the engine never has to guess a "default".
         let resolved = self.pickers.read(cx).resolved(cx);
-        let existing_cwd = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .and_then(|c| c.cwd.clone());
+        let existing_cwd = {
+            let state = self.state.read(cx);
+            self.target_chat_row(state).and_then(|c| c.cwd.clone())
+        };
         // The PROJECT fixes the new chat's device + base folder — sessions are
         // minted onto the project's device, not necessarily this one. With no
         // project ("Don't work in a project") the composer's device pick is
@@ -6000,9 +6049,8 @@ impl Composer {
                 .clone()
                 .unwrap_or_else(|| "local".to_string())
         } else {
-            self.state
-                .read(cx)
-                .selected_chat_row()
+            let state = self.state.read(cx);
+            self.target_chat_row(state)
                 .map(|c| c.device_id.clone())
                 .or_else(|| local_device_id.clone())
                 .unwrap_or_else(|| "local".to_string())
@@ -6014,10 +6062,8 @@ impl Composer {
                 .clone()
                 .filter(|id| local_device_id.as_deref() != Some(id.as_str()))
         } else {
-            self.state
-                .read(cx)
-                .selected_chat_row()
-                .map(|c| c.device_id.clone())
+            let state = self.state.read(cx);
+            self.target_chat_row(state).map(|c| c.device_id.clone())
         };
         let space_id = space.as_ref().map(|s| s.id.clone());
         let space_path = space.as_ref().map(|s| s.path.clone());
@@ -6063,6 +6109,10 @@ impl Composer {
         });
         let typed = text.clone();
         let text = crate::comments::with_comments(&text, &comments);
+        // The side chat's context seed rides the FIRST prompt only — the
+        // fresh session opens with the source conversation's tail. Not in
+        // the echo (the user's own words stay clean) and not in queue rows.
+        let context_prefix = self.pending_context.take();
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().timestamp_millis();
@@ -6527,7 +6577,11 @@ impl Composer {
                     .is_some();
                 let command = SessionCommandPayload::Run {
                     request: RunRequest {
-                        prompt: content.clone(),
+                        prompt: context_prefix
+                            .as_ref()
+                            .filter(|context| !context.is_empty())
+                            .map(|context| format!("{context}\n{content}"))
+                            .unwrap_or_else(|| content.clone()),
                         harness: resolved.harness,
                         model: resolved.model.clone(),
                         reasoning: resolved.reasoning,
@@ -6724,7 +6778,7 @@ impl Composer {
     }
 
     pub(crate) fn interrupt_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+        let Some(chat_id) = self.target_chat_id(self.state.read(cx)) else {
             return;
         };
         self.interrupt_chat(chat_id, cx);
@@ -6832,7 +6886,7 @@ impl Composer {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+        let Some(chat_id) = self.target_chat_id(self.state.read(cx)) else {
             return;
         };
         let request_id = wizard.request_id.clone();
@@ -7315,7 +7369,7 @@ impl Render for Composer {
         }
         // New chats render expanded regardless of `expanded_mode` (see below),
         // so a mode flip there changes nothing visible — never morph it.
-        let new_chat = self.state.read(cx).selected_chat.is_none();
+        let new_chat = self.target_chat_id(self.state.read(cx)).is_none();
         // Morph clock in ms; dividing by the measurement knob stretches the
         // timeline exactly like shell.rs eval_tween's scaled duration.
         let now_ms = self.morph_clock.elapsed().as_secs_f32() * 1000.0 / motion::speed_scale();
@@ -7351,8 +7405,8 @@ impl Render for Composer {
         let queue_notice: Option<(SharedString, bool)> = {
             use zeron_proto::ConnectivityState as S;
             let state = self.state.read(cx);
-            let degraded = match state.selected_chat.as_deref() {
-                Some(id) => state.chat_delivery_degraded(id),
+            let degraded = match self.target_chat_id(state) {
+                Some(id) => state.chat_delivery_degraded(&id),
                 None => {
                     // New-chat canvas: judge by the picked target device.
                     let remote_target = state

@@ -2954,7 +2954,7 @@ impl Transcript {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        Self::build(state, None, true, cx)
+        Self::build(state, None, true, false, cx)
     }
 
     /// A read-only transcript over one SUBAGENT doc (right-pane tab). The
@@ -2969,13 +2969,21 @@ impl Transcript {
         follow: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::build(state, Some(doc_id), follow, cx)
+        Self::build(state, Some(doc_id), follow, false, cx)
+    }
+
+    /// A live CONVERSATION inside the right pane (side chat): the doc id is a
+    /// real chat id, so the surface gets the primary layout — bottom-anchored
+    /// with the tail pin — instead of the subagent heuristics.
+    pub fn for_side_chat(state: Entity<AppState>, doc_id: String, cx: &mut Context<Self>) -> Self {
+        Self::build(state, Some(doc_id), true, true, cx)
     }
 
     fn build(
         state: Entity<AppState>,
         doc_override: Option<String>,
         follow: bool,
+        chat_layout: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         // FollowMode stays Normal: the tail pin is ours (a per-frame spring),
@@ -2991,7 +2999,9 @@ impl Transcript {
         // materializes a Top list's past-end offset to a CONCRETE position
         // every frame (gpui list.rs: only `Bottom` re-glues to the `None`
         // sentinel), so a parked spring can't re-glue and hard-track growth.
-        let alignment = if doc_override.is_some() {
+        // A side-chat doc keeps Bottom: its surface has a composer, so the
+        // transcript anchors where the conversation continues.
+        let alignment = if doc_override.is_some() && !chat_layout {
             ListAlignment::Top
         } else {
             ListAlignment::Bottom

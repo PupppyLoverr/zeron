@@ -1745,7 +1745,13 @@ impl AppState {
 
     pub fn selected_chat_row(&self) -> Option<&Chat> {
         let id = self.selected_chat.as_deref()?;
-        self.chats.iter().find(|c| c.id == id)
+        self.chat_row(id)
+    }
+
+    /// Any chat row by id — a side-chat surface resolves its bound
+    /// conversation's config, cwd and host device through this.
+    pub fn chat_row(&self, chat_id: &str) -> Option<&Chat> {
+        self.chats.iter().find(|c| c.id == chat_id)
     }
 
     /// The chat the Archive session shortcut acts on: the selected one, unless

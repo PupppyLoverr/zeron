@@ -498,6 +498,9 @@ pub struct Pickers {
     /// Selection the draft picks belong to — switching chats drops them so a
     /// pick made in one chat never leaks into another.
     draft_owner: Option<String>,
+    /// A pickers bound to a fixed chat (the side-chat composer) resolves that
+    /// chat instead of the shell's selection.
+    chat_override: Option<String>,
     /// Space the branch draft/cache belong to (see the state observer).
     space_owner: Option<String>,
     device_owner: Option<String>,
@@ -690,6 +693,7 @@ impl Pickers {
             defaults,
             data_dir,
             draft_owner,
+            chat_override: None,
             open,
             model_rail: ModelRail::default(),
             setting_menu: None,
@@ -741,7 +745,30 @@ impl Pickers {
 
     /// Harness is locked once the chat exists (feature-inventory §1.7).
     fn harness_locked(&self, cx: &App) -> bool {
-        self.state.read(cx).selected_chat.is_some()
+        self.chat_id(self.state.read(cx)).is_some()
+    }
+
+    /// Bind this pickers entity to a fixed chat (the side-chat composer).
+    /// Call once at construction — later rebinds are not supported.
+    pub fn set_chat_override(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.draft_owner = Some(chat_id.clone());
+        self.chat_override = Some(chat_id);
+        cx.notify();
+    }
+
+    /// The chat this picker serves: the bound override, else the selection.
+    fn chat_id(&self, state: &AppState) -> Option<String> {
+        self.chat_override
+            .clone()
+            .or_else(|| state.selected_chat.clone())
+    }
+
+    /// That chat's workspace row.
+    fn chat_row<'a>(&self, state: &'a AppState) -> Option<&'a zeron_proto::Chat> {
+        match self.chat_override.as_deref() {
+            Some(id) => state.chat_row(id),
+            None => state.selected_chat_row(),
+        }
     }
 
     fn engine(&self, cx: &App) -> Option<EngineHandle> {
@@ -765,9 +792,7 @@ impl Pickers {
             return Some(harness);
         }
         if let Some(config) = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .chat_row(self.state.read(cx))
             .and_then(|c| c.config.as_ref())
         {
             return Some(config.harness);
@@ -799,7 +824,7 @@ impl Pickers {
         if let Some(id) = self.config.model.as_deref() {
             return Some(id);
         }
-        if let Some(chat) = self.state.read(cx).selected_chat_row() {
+        if let Some(chat) = self.chat_row(self.state.read(cx)) {
             return chat.config.as_ref().and_then(|c| c.model.as_deref());
         }
         let harness = self.effective_harness(cx)?;
@@ -811,7 +836,7 @@ impl Pickers {
     /// model's ladder, falling back to the model's default level.
     fn effective_reasoning(&self, cx: &App) -> Option<ReasoningLevel> {
         let explicit = self.config.reasoning.or_else(|| {
-            match self.state.read(cx).selected_chat_row() {
+            match self.chat_row(self.state.read(cx)) {
                 Some(chat) => chat.config.as_ref().and_then(|c| c.reasoning),
                 // New chat: the remembered last-used level.
                 None => self.defaults.reasoning,
@@ -844,7 +869,7 @@ impl Pickers {
     /// selections for existing chats, the remembered picks for the model the
     /// new-chat canvas resolves to (same id [`Self::resolved`] sends).
     fn explicit_options(&self, cx: &App) -> serde_json::Map<String, serde_json::Value> {
-        if let Some(chat) = self.state.read(cx).selected_chat_row() {
+        if let Some(chat) = self.chat_row(self.state.read(cx)) {
             return chat
                 .config
                 .as_ref()
@@ -1348,7 +1373,7 @@ impl Pickers {
         // Refs are fixed at creation: an existing session can never move
         // (wing's rule — the footer renders read-only labels there, so this
         // is a belt-and-braces guard).
-        if self.state.read(cx).selected_chat_row().is_some() {
+        if self.chat_row(self.state.read(cx)).is_some() {
             return;
         }
         if row.worktree_path.is_some() {
@@ -1465,7 +1490,7 @@ impl Pickers {
         // The card stays open on a pick (user request): model and traits
         // share one popover now, and adjusting the tray right after choosing
         // a model is the expected flow. Esc, click-out, or the chip close it.
-        if self.state.read(cx).selected_chat.is_some() {
+        if self.chat_id(self.state.read(cx)).is_some() {
             // Existing chat: persist to the chat row (Mutate setChatConfig) —
             // survives restarts and syncs; next runs in this chat use it.
             self.update_chat_config(cx, move |config| config.model = Some(model_id));
@@ -1489,7 +1514,7 @@ impl Pickers {
 
     fn pick_reasoning(&mut self, level: ReasoningLevel, cx: &mut Context<Self>) {
         // Always a concrete selection (no toggle-back-to-default).
-        if self.state.read(cx).selected_chat.is_some() {
+        if self.chat_id(self.state.read(cx)).is_some() {
             self.update_chat_config(cx, move |config| config.reasoning = Some(level));
         } else {
             self.config.reasoning = Some(level);
@@ -1506,7 +1531,7 @@ impl Pickers {
         default: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.state.read(cx).selected_chat.is_some() {
+        if self.chat_id(self.state.read(cx)).is_some() {
             self.update_chat_config(cx, move |config| {
                 if default {
                     config.model_options.remove(&option_id);
@@ -1541,7 +1566,7 @@ impl Pickers {
     /// row always carries the CONCRETE resolved model/reasoning, with the
     /// reasoning re-clamped to the (possibly just-changed) model's ladder.
     fn update_chat_config(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut ChatConfig)) {
-        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+        let Some(chat_id) = self.chat_id(self.state.read(cx)) else {
             return;
         };
         let resolved = self.resolved(cx);
@@ -1550,9 +1575,7 @@ impl Pickers {
         };
         // Preserve fields the pickers don't own.
         if let Some(existing) = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .chat_row(self.state.read(cx))
             .and_then(|c| c.config.as_ref())
         {
             config.sandbox = existing.sandbox;
@@ -1787,9 +1810,7 @@ impl Pickers {
     fn selected_ref_index(&self, cx: &App) -> usize {
         let rows = self.filtered_ref_rows(cx);
         let selected = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .chat_row(self.state.read(cx))
             .and_then(|c| c.branch.clone())
             .or_else(|| self.config.branch.clone());
         let index = match selected {
@@ -2699,10 +2720,7 @@ impl Pickers {
         let (space, session, change_request) = {
             let state = self.state.read(cx);
             let space = state.selected_space_row().cloned();
-            let session = state
-                .selected_chat
-                .as_ref()
-                .and_then(|_| state.selected_chat_row().cloned());
+            let session = self.chat_row(state).cloned();
             let change_request = session
                 .as_ref()
                 .and_then(|chat| state.change_request_for_chat(chat).cloned());
@@ -3030,9 +3048,7 @@ impl Pickers {
         // pick switches the checkout (see `pick_ref`); a new chat highlights
         // the draft pick.
         let session_branch = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .chat_row(self.state.read(cx))
             .and_then(|c| c.branch.clone());
         let switching = self.switching.clone();
         let scrollbar = popover::rail(self, "branch-scrollbar", &theme, cx);
@@ -3229,7 +3245,7 @@ impl Pickers {
         // Compact tabbed layout (user request, modeled on the referenced
         // picker): the model LIST gets a fixed band of roughly seven compact
         // rows; the pinned traits tray below sizes to its sections.
-        let list_height = if self.state.read(cx).selected_chat.is_none() {
+        let list_height = if self.chat_id(self.state.read(cx)).is_none() {
             // Keep the settings tray visible while the model list scrolls
             // within the room below the new-chat composer.
             let tray_height = if self.setting_groups(cx).is_empty() {
@@ -4671,7 +4687,7 @@ impl Render for Pickers {
             &theme,
             cx,
         );
-        let new_chat = self.state.read(cx).selected_chat.is_none();
+        let new_chat = self.chat_id(self.state.read(cx)).is_none();
         let entity = cx.entity().downgrade();
         let model_chip = model_chip.relative().child(
             gpui::canvas(
