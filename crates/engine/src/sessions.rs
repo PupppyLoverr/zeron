@@ -85,11 +85,21 @@ struct RuntimeConfig {
 
 impl RuntimeConfig {
     fn from_request(harness_id: HarnessId, request: &RunRequest) -> Self {
+        // Internal keys mark ONE run's behavior (the host-local browser
+        // endpoint), never the session's runtime shape — a stamped send
+        // followed by an unstamped one must still route into the parked
+        // session, so they are filtered out of the comparison.
+        let model_options: serde_json::Map<String, serde_json::Value> = request
+            .model_options
+            .iter()
+            .filter(|(k, _)| !zeron_proto::is_internal_option(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         Self {
             harness_id,
             model: request.model.clone(),
             reasoning: request.reasoning,
-            model_options: request.model_options.clone(),
+            model_options,
             cwd: request.cwd.clone(),
             sandbox: request.sandbox,
             auto_approve: request.auto_approve,
@@ -134,6 +144,9 @@ struct Inner {
     device_id: String,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
+    /// Host-local embedded-browser leases (RegisterBrowser IPC; never
+    /// relay-forwarded, never persisted).
+    browsers: Mutex<crate::browser::BrowserRegistry>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
     /// doc-host reference each other through Arcs, so this back-edge must be
     /// severable for a replaced engine graph to drop.
@@ -185,6 +198,7 @@ impl SessionsEngine {
                 device_id,
                 journal,
                 registry,
+                browsers: Mutex::new(Default::default()),
                 doc_host: Mutex::new(None),
                 runs: Mutex::new(HashMap::new()),
                 hubs: Mutex::new(HashMap::new()),
@@ -214,6 +228,11 @@ impl SessionsEngine {
     /// already treats a missing doc host as "not wired".
     pub fn clear_doc_host(&self) {
         lock(&self.inner.doc_host).take();
+    }
+
+    /// A live desktop viewport renews its embedded-browser lease over local IPC.
+    pub fn register_browser(&self, url: &str) -> Result<(), String> {
+        lock(&self.inner.browsers).renew(url, std::time::Instant::now())
     }
 
     /// Bind generated-image intake to the same profile store used by attachment RPCs.
@@ -361,6 +380,11 @@ impl SessionsEngine {
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = expand_home(&request.cwd);
+        // Stamps the live host-local embedded-browser endpoint (see
+        // RegisterBrowser): a queued run inherits a stable live window;
+        // stale or remote-stamped endpoints are removed rather than
+        // forwarded into a local run.
+        lock(&self.inner.browsers).prepare(&mut request, std::time::Instant::now());
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
@@ -1501,6 +1525,10 @@ async fn drive_run(
         resume: None,
         ..request.clone()
     });
+    // Transient harness copy: the journal/retry keep the user's raw prompt;
+    // routing guidance is prepended only to what the model sees, and only
+    // when the run carries a live embedded-browser stamp.
+    zeron_harness::prepare_browser_prompt(&mut request);
     // Startup can stop before the SDK saves user text, with no new session
     // ID or receipt. Bridge that unacknowledged tail from our transcript;
     // a fresh session needs all prior user text, not just the latest tail.

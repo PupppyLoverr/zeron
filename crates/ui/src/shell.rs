@@ -1518,6 +1518,10 @@ pub struct Shell {
     browser_seq: u64,
     browser_context: crate::browser::BrowserContext,
     browser_profile: Option<String>,
+    /// Loopback MCP endpoint the chat's own harness drives the embedded
+    /// browser through. Held only to keep the listener alive.
+    _browser_bridge: Option<crate::browser::bridge::BrowserBridge>,
+    _browser_bridge_drain: Option<gpui::Task<()>>,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
     /// closed terminals/diffs — are skipped at read time).
     right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
@@ -1882,6 +1886,34 @@ impl Shell {
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
+        // The embedded-browser MCP bridge binds an ephemeral loopback port
+        // with a per-window token; tool calls hop a channel into
+        // `bridge_dispatch` on the UI thread.
+        let (browser_bridge, _browser_bridge_drain) =
+            match crate::browser::bridge::BrowserBridge::start(cx) {
+                Some((bridge, mut requests)) => {
+                    state.update(cx, |state, _| {
+                        state.browser_bridge = Some(bridge.info.clone());
+                    });
+                    let drain = cx.spawn(async move |this, cx| {
+                        while let Some(request) = requests.recv().await {
+                            // A gone window drops the request unanswered —
+                            // the caller's timeout reports it cleanly.
+                            let _ = this.update_in(cx, |shell, window, cx| {
+                                shell.bridge_dispatch(
+                                    request.tool,
+                                    request.args,
+                                    request.reply,
+                                    window,
+                                    cx,
+                                )
+                            });
+                        }
+                    });
+                    (Some(bridge), Some(drain))
+                }
+                None => (None, None),
+            };
         Self {
             state,
             sidebar_pane,
@@ -1923,6 +1955,8 @@ impl Shell {
             browser_seq: 0,
             browser_context: crate::browser::BrowserContext::default(),
             browser_profile: None,
+            _browser_bridge: browser_bridge,
+            _browser_bridge_drain,
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
             right_tab_scroll: gpui::ScrollHandle::new(),
@@ -2945,6 +2979,203 @@ impl Shell {
                 browser.navigate(&url, window, cx);
             } else {
                 browser.focus_address(window, cx);
+            }
+        });
+    }
+
+    fn bridge_dispatch(
+        &mut self,
+        tool: String,
+        args: serde_json::Value,
+        reply: tokio::sync::oneshot::Sender<Result<crate::browser::bridge::BridgeReply, String>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::browser::bridge::BridgeReply;
+        if tool == "browser_tabs" {
+            let active = match self.resolved_right_active(cx) {
+                RightSurface::Browser(id) => Some(id),
+                _ => None,
+            };
+            let tabs: Vec<serde_json::Value> = self
+                .browsers
+                .iter()
+                .map(|(id, browser)| {
+                    let browser = browser.read(cx);
+                    serde_json::json!({
+                        "tab": id,
+                        "url": browser.page.url,
+                        "title": browser.page.title,
+                        "active": active == Some(*id),
+                    })
+                })
+                .collect();
+            let _ = reply.send(Ok(BridgeReply::text(
+                serde_json::to_string_pretty(&tabs).unwrap_or_default(),
+            )));
+            return;
+        }
+        if tool == "browser_open" {
+            let Some(url) = args.get("url").and_then(|v| v.as_str()) else {
+                let _ = reply.send(Err("browser_open requires a url".into()));
+                return;
+            };
+            if !crate::browser::model::allowed_navigation(url) {
+                let _ = reply.send(Err("Only http and https pages can be opened".into()));
+                return;
+            }
+            self.add_browser_surface(Some(url.to_string()), window, cx);
+            let _ = reply.send(Ok(BridgeReply::text(format!("Opened {url}"))));
+            return;
+        }
+        // Target: an explicit `tab` id, else the visible browser, else the
+        // only browser when there's exactly one.
+        let target = args
+            .get("tab")
+            .and_then(|v| v.as_u64())
+            .or_else(|| match self.resolved_right_active(cx) {
+                RightSurface::Browser(id) => Some(id),
+                _ => None,
+            })
+            .or_else(|| {
+                (self.browsers.len() == 1)
+                    .then(|| self.browsers.keys().next().copied())
+                    .flatten()
+            });
+        let Some(id) = target else {
+            let _ = reply.send(Err(if self.browsers.is_empty() {
+                "No embedded browser tab is open. Open one with browser_open.".into()
+            } else {
+                "More than one browser tab is open — pass `tab` from browser_tabs.".into()
+            }));
+            return;
+        };
+        let Some(browser) = self.browsers.get(&id).cloned() else {
+            let _ = reply.send(Err("That browser tab no longer exists.".into()));
+            return;
+        };
+        browser.update(cx, |browser, cx| match tool.as_str() {
+            "browser_navigate" => match args.get("url").and_then(|v| v.as_str()) {
+                Some(url) => {
+                    browser.navigate(url, window, cx);
+                    let _ = reply.send(Ok(BridgeReply::text(format!("Navigated to {url}"))));
+                }
+                None => {
+                    let _ = reply.send(Err("browser_navigate requires a url".into()));
+                }
+            },
+            "browser_reload" => {
+                browser.reload(cx);
+                let _ = reply.send(Ok(BridgeReply::text("Reloaded the page.")));
+            }
+            "browser_back" => {
+                browser.history(false);
+                let _ = reply.send(Ok(BridgeReply::text("Went back.")));
+            }
+            "browser_forward" => {
+                browser.history(true);
+                let _ = reply.send(Ok(BridgeReply::text("Went forward.")));
+            }
+            "browser_state" => {
+                let page = &browser.page;
+                let _ = reply.send(Ok(BridgeReply::text(
+                    serde_json::json!({
+                        "tab": id,
+                        "url": page.url,
+                        "title": page.title,
+                        "loading": page.loading,
+                        "canGoBack": page.can_back,
+                        "canGoForward": page.can_forward,
+                    })
+                    .to_string(),
+                )));
+            }
+            "browser_screenshot" => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                browser.screenshot(tx);
+                cx.spawn(async move |_, _| {
+                    let result = match rx.await {
+                        Ok(Ok(png)) => Ok(BridgeReply {
+                            text: None,
+                            image: Some(png),
+                        }),
+                        Ok(Err(error)) => Err(error),
+                        Err(_) => Err("The page capture did not answer".into()),
+                    };
+                    let _ = reply.send(result);
+                })
+                .detach();
+            }
+            _ => {
+                let expression = match tool.as_str() {
+                    "browser_evaluate" => args
+                        .get("script")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    "browser_click" => args
+                        .get("selector")
+                        .and_then(|v| v.as_str())
+                        .map(|selector| {
+                            format!(
+                                "(()=>{{const e=document.querySelector({sel});if(!e)return{{ok:false,e:'element not found'}};e.scrollIntoView({{block:'center',inline:'center'}});e.click();return{{ok:true,tag:e.tagName.toLowerCase()}}}})()",
+                                sel = serde_json::json!(selector)
+                            )
+                        }),
+                    "browser_type" => match (
+                        args.get("selector").and_then(|v| v.as_str()),
+                        args.get("text").and_then(|v| v.as_str()),
+                    ) {
+                        (Some(selector), Some(text)) => Some(format!(
+                            "(()=>{{const e=document.querySelector({sel});if(!e)return{{ok:false,e:'element not found'}};e.focus();const d=Object.getOwnPropertyDescriptor(e.__proto__,'value');if(d&&d.set)d.set.call(e,{text});else e.value={text};e.dispatchEvent(new Event('input',{{bubbles:true}}));e.dispatchEvent(new Event('change',{{bubbles:true}}));return{{ok:true}}}})()",
+                            sel = serde_json::json!(selector),
+                            text = serde_json::json!(text)
+                        )),
+                        _ => None,
+                    },
+                    "browser_scroll" => {
+                        let x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        Some(format!(
+                            "(window.scrollBy({x},{y}),{{ok:true,scrollX:window.scrollX,scrollY:window.scrollY}})"
+                        ))
+                    }
+                    "browser_text" => Some(
+                        "(document.body?document.body.innerText.slice(0,20000):'')".to_string(),
+                    ),
+                    _ => None,
+                };
+                let Some(expression) = expression else {
+                    let _ = reply.send(Err(format!("Bad arguments for {tool}")));
+                    return;
+                };
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                browser.evaluate(&expression, tx);
+                cx.spawn(async move |_, _| {
+                    let result = match rx.await {
+                        Ok(value) => {
+                            if value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                                Ok(BridgeReply::text(
+                                    value
+                                        .get("v")
+                                        .map(|v| match v {
+                                            serde_json::Value::String(s) => s.clone(),
+                                            other => other.to_string(),
+                                        })
+                                        .unwrap_or_else(|| "null".to_string()),
+                                ))
+                            } else {
+                                Err(value
+                                    .get("e")
+                                    .and_then(|e| e.as_str())
+                                    .unwrap_or("The script failed")
+                                    .to_string())
+                            }
+                        }
+                        Err(_) => Err("The page did not answer".into()),
+                    };
+                    let _ = reply.send(result);
+                })
+                .detach();
             }
         });
     }

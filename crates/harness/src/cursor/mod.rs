@@ -277,6 +277,7 @@ impl Harness for CursorHarness {
             cmd.env("ZERON_CURSOR_STATE_DIR", state::state_root());
         }
         crate::compose_child_path(&mut cmd, &exe);
+        crate::browser_bridge_env(&mut cmd, &request);
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }

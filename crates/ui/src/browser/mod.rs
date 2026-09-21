@@ -11,6 +11,7 @@ use linux as native;
 use macos as native;
 #[cfg(target_os = "windows")]
 use windows as native;
+pub mod bridge;
 pub mod model;
 mod view;
 

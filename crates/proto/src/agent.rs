@@ -128,6 +128,32 @@ pub struct RunRequest {
     pub worktree: Option<WorktreeSpec>,
 }
 
+/// `RunRequest.model_options` key carrying the embedded-browser bridge
+/// endpoint (`{"url": "http://127.0.0.1:<port>/mcp/<token>"}`). The engine
+/// stamps it on local-host runs only — the loopback URL is meaningless on a
+/// remote host — and title-only runs drop `model_options` entirely, so
+/// discovery probes never see it.
+pub const BROWSER_BRIDGE_OPTION: &str = "zeron_browser_bridge";
+
+/// The bridge endpoint URL for this run, if the UI stamped one.
+pub fn browser_bridge_url(request: &RunRequest) -> Option<&str> {
+    request
+        .model_options
+        .get(BROWSER_BRIDGE_OPTION)
+        .and_then(|v| v.get("url"))
+        .and_then(serde_json::Value::as_str)
+}
+
+/// `model_options` keys carrying zeron-internal run directives, never harness
+/// config. RuntimeConfig comparisons ignore them — they mark ONE run's
+/// behavior, not the session's runtime shape. Includes underscore-prefixed
+/// `_zeron*` keys and the host-local embedded-browser endpoint, whose URL
+/// must not restart a live runtime when a later send inherits a different
+/// window.
+pub fn is_internal_option(key: &str) -> bool {
+    key.starts_with("_zeron") || key == BROWSER_BRIDGE_OPTION
+}
+
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created
 /// by the HOST while draining the queued Run — not by the sender over a
 /// blocking CreateWorktree RPC — so the send path stays durable: a lost relay
@@ -610,5 +636,49 @@ mod generated_image_tests {
         assert_eq!(value["type"], "generatedImage");
         assert_eq!(value["mimeType"], "image/png");
         assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
+    }
+}
+
+#[cfg(test)]
+mod internal_option_tests {
+    use super::*;
+
+    #[test]
+    fn browser_bridge_is_internal_and_harness_options_are_not() {
+        assert!(is_internal_option("_zeron_attach_replay"));
+        assert!(is_internal_option(BROWSER_BRIDGE_OPTION));
+        assert!(!is_internal_option("serviceTier"));
+        assert!(!is_internal_option("zeron_unrelated"));
+    }
+
+    #[test]
+    fn browser_bridge_url_reads_only_the_stamped_shape() {
+        let mut request = RunRequest {
+            prompt: "Browse".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            cwd: ".".into(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+        };
+        assert_eq!(browser_bridge_url(&request), None);
+        request.model_options.insert(
+            BROWSER_BRIDGE_OPTION.into(),
+            serde_json::json!("not-an-object"),
+        );
+        assert_eq!(browser_bridge_url(&request), None);
+        request.model_options.insert(
+            BROWSER_BRIDGE_OPTION.into(),
+            serde_json::json!({"url": "http://127.0.0.1:43123/mcp/tok"}),
+        );
+        assert_eq!(
+            browser_bridge_url(&request),
+            Some("http://127.0.0.1:43123/mcp/tok")
+        );
     }
 }

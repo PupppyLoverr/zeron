@@ -108,6 +108,10 @@ pub mod methods {
     /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
     /// the answer is about whichever engine you are directly connected to).
     pub const LOCAL_DEVICE: &str = "LocalDevice";
+    /// Renew a desktop viewport's host-local embedded-browser lease
+    /// (IPC-only; never relay-forwarded — the stamped loopback URL is only
+    /// meaningful to a harness running on THIS host).
+    pub const REGISTER_BROWSER: &str = "RegisterBrowser";
     /// This engine runtime's fixed device and workspace identity.
     pub const ENGINE_INFO: &str = "EngineInfo";
     /// Readiness barrier for the engine runtime. The call completes once stores

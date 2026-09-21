@@ -55,6 +55,14 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Stdio MCP front for the embedded browser — spawned by harnesses as an
+    /// MCP server subprocess, proxying the app's loopback bridge endpoint.
+    /// stdout is protocol traffic, so it dispatches before logging installs.
+    BrowserBridge {
+        /// Loopback MCP endpoint stamped on the run request.
+        #[arg(long)]
+        url: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -117,6 +125,11 @@ fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
+    // MCP stdio servers speak JSON-RPC on stdout — dispatch before the
+    // tracing layer (which writes to stdout) installs.
+    if let Some(Command::BrowserBridge { url }) = &cli.command {
+        return zeron_ui::browser::bridge::serve_stdio(url);
+    }
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
         zeron_update::windows::wait_for_exit(pid)?;
@@ -212,6 +225,9 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Update { check }) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(update_cli::update(&edge_url_from_env(), check))
+        }
+        Some(Command::BrowserBridge { .. }) => {
+            unreachable!("browser-bridge dispatches before tracing init")
         }
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env().data_dir),

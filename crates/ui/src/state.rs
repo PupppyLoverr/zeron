@@ -743,6 +743,10 @@ pub struct AppState {
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
     /// the engine serves it — views degrade gracefully).
     pub local_device_id: Option<String>,
+    /// Loopback endpoint agents on local chats use to drive the embedded
+    /// browser (registered with the engine so it can stamp
+    /// `RunRequest.model_options`; `None` until the shell's bridge binds).
+    pub browser_bridge: Option<crate::browser::bridge::BridgeInfo>,
     /// Latest `UpdateStatus` frame — drives the sidebar update strip.
     pub update: Option<zeron_update::UpdateStatus>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
@@ -821,6 +825,7 @@ impl AppState {
             review_comments: HashMap::new(),
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
+            browser_bridge: None,
             update: None,
             data_dir: None,
             engine: None,
@@ -1923,6 +1928,7 @@ impl AppState {
             ),
             spawn_local_device_probe(cx, handle.clone()),
         ]);
+        watch_tasks.push(spawn_browser_registration(cx, handle.clone()));
         self.watch_tasks = watch_tasks;
         self.reconcile_change_request_watches(cx);
         // EngineInfo is part of the attachment boundary: views must know which
@@ -2266,6 +2272,34 @@ fn spawn_deferred_engine_watch(
 /// Chats watch. Boot selection is the shell's job (it lands on the first
 /// restored open tab, device-local state this entity can't see); this task
 /// only pumps frames.
+/// Renews the embedded-browser lease with the local engine every 10s so the
+/// engine keeps stamping local runs with this window's bridge URL (45s lease;
+/// device-local IPC only — the URL is meaningless to a remote engine).
+fn spawn_browser_registration(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        loop {
+            let Ok(bridge) = this.update(cx, |state, _| state.browser_bridge.clone()) else {
+                return;
+            };
+            if let Some(bridge) = bridge {
+                // Uses the local engine connection, never targetDeviceId. A
+                // bounded call lets the lease recover after an IPC outage.
+                let _ = crate::attachments::call_with_timeout(
+                    &handle,
+                    cx.background_executor(),
+                    methods::REGISTER_BROWSER,
+                    serde_json::json!({"url": bridge.url}),
+                    std::time::Duration::from_secs(5),
+                )
+                .await;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(10))
+                .await;
+        }
+    })
+}
+
 fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
     cx.spawn(async move |this, cx| {
         // Resubscribe loop (same contract as the transcript watch): a daemon
