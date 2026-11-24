@@ -1146,3 +1146,26 @@ test("the wallpaper's rows stand inline in one card, a hairline only between the
 	expect(app:count(`{NEW_CHAT} >> .settings-rule`)).to_be(0)
 	expect(app:state("shell_wallpaper_image")).never.to_be_nil()
 end)
+
+-- #1396: the picker offering a model whose agent can't title, the engine
+-- refusing the choice.
+test("the Thread naming picker offers only models of a title-capable agent", function()
+	local app = open("General")
+	app:set_state("chat.catalog", {
+		state = "ready",
+		harnesses = {
+			{ id = "claude-code", label = "Claude", titles = true },
+			{ id = "opencode", label = "OpenCode", titles = false },
+		},
+		models = {
+			{ value = "claude-code/opus", label = "Opus", harness = "claude-code" },
+			{ value = "opencode/big-pickle", label = "Big Pickle", harness = "opencode" },
+		},
+	})
+	app:frames(10)
+	app:click('role:button "Thread naming"')
+	app:frames(10)
+	expect(app:has('role:menuitem "Session agent"')).to_be(true)
+	expect(app:has('role:menuitem "Opus"')).to_be(true)
+	expect(app:has('role:menuitem ~"Big Pickle"')).to_be(false)
+end)
